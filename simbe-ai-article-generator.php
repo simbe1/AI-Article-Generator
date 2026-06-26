@@ -3,9 +3,9 @@
  * Plugin Name: Simbe AI Article Generator
  * Plugin URI: https://investoryspot.com/plugins
  * Description: Generate SEO & GEO optimized articles with 15 styles + optional Groq AI.
- * Version: 4.1.0
+ * Version: 4.0.1
  * Requires at least: 5.0
- * Tested up to: 7.0
+ * Tested up to: 6.9
  * Requires PHP: 7.4
  * Author: simbe1
  * Author URI: https://investoryspot.com
@@ -39,9 +39,9 @@ register_activation_hook(__FILE__, 'simbe1_article_generator_activate');
 
 class SimbeAI_Article_Generator {
     
-    private $version = '4.1.0';
+    private $version = '4.0.1';
+    private $daily_limit = 5;
     private $styles = array();
-    private $last_ai_error = '';
     
     public function __construct() {
         $this->init_styles();
@@ -51,7 +51,6 @@ class SimbeAI_Article_Generator {
         add_action('wp_ajax_simbe1_save_article', array($this, 'ajax_save_article'));
         add_action('wp_ajax_simbe1_fetch_url', array($this, 'ajax_fetch_url'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
-        add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_action_links'));
     }
     
 public function enqueue_admin_scripts($hook) {
@@ -62,12 +61,6 @@ public function enqueue_admin_scripts($hook) {
         wp_enqueue_style('wp-editor');
         wp_enqueue_media();
         wp_enqueue_style('dashicons');
-        wp_enqueue_style(
-            'simbe1-admin',
-            plugin_dir_url(__FILE__) . 'inc/admin.css',
-            array('dashicons'),
-            $this->version
-        );
 
         wp_enqueue_script(
             'simbe1-article-generator',
@@ -210,10 +203,9 @@ public function enqueue_admin_scripts($hook) {
         return !empty($this->get_api_key());
     }
     
-    // Surface Groq API errors
+    // Generate with Groq AI
     private function generate_with_ai($topic, $style, $length, $location) {
         $api_key = $this->get_api_key();
-        $this->last_ai_error = '';
         
         $style_config = $this->styles[$style] ?? $this->styles['guide'];
         $tone = $style_config['tone'];
@@ -250,21 +242,13 @@ public function enqueue_admin_scripts($hook) {
         ));
         
         if (is_wp_error($response)) {
-            $this->last_ai_error = $response->get_error_message();
             return false;
         }
         
         $body = json_decode(wp_remote_retrieve_body($response), true);
-        
-        if (!empty($body['error']['message'])) {
-            $this->last_ai_error = $body['error']['message'];
-            return false;
-        }
-        
         $content = $body['choices'][0]['message']['content'] ?? '';
         
         if (empty($content)) {
-            $this->last_ai_error = 'Empty response from AI service';
             return false;
         }
         
@@ -591,6 +575,43 @@ public function enqueue_admin_scripts($hook) {
         return strtolower(str_replace(' ', '-', $subject));
     }
     
+    // Track generation
+    private function track_generation($user_id, $post_id, $source_url, $topic, $style, $used_ai) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'simbe1_article_tracking';
+        
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+        $wpdb->insert($table, array(
+            'user_id' => $user_id,
+            'post_id' => $post_id,
+            'source_url' => $source_url,
+            'topic' => $topic,
+            'style' => $style,
+            'used_ai' => $used_ai ? 1 : 0,
+            'generated_at' => current_time('mysql')
+        ));
+    }
+    
+    private function check_rate_limit($user_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'simbe1_article_tracking';
+        $today = gmdate('Y-m-d');
+        
+        $sql = "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND DATE(generated_at) = %s";
+        $count = $wpdb->get_var($wpdb->prepare($sql, $user_id, $today));
+        
+        return intval($count) < $this->daily_limit;
+    }
+    
+    private function get_today_count($user_id) {
+        global $wpdb;
+        $table = $wpdb->prefix . 'simbe1_article_tracking';
+        $today = gmdate('Y-m-d');
+        
+        $sql = "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND DATE(generated_at) = %s";
+        return intval($wpdb->get_var($wpdb->prepare($sql, $user_id, $today)));
+    }
+    
     
     
     
@@ -600,6 +621,13 @@ public function enqueue_admin_scripts($hook) {
         
         if (!current_user_can('edit_posts')) {
             wp_send_json_error(array('message' => 'Permission denied'));
+            return;
+        }
+        
+        $user_id = get_current_user_id();
+        
+        if (!$this->check_rate_limit($user_id)) {
+            wp_send_json_error(array('message' => 'Daily limit reached (5 articles/day)'));
             return;
         }
         
@@ -618,10 +646,6 @@ public function enqueue_admin_scripts($hook) {
         
         if ($this->is_ai_enabled()) {
             $article = $this->generate_with_ai($topic, $style, $length, $location);
-            if ($article === false && !empty($this->last_ai_error)) {
-                wp_send_json_error(array('message' => 'AI Error: ' . $this->last_ai_error));
-                return;
-            }
             $used_ai = ($article !== false);
         }
         
@@ -701,6 +725,11 @@ public function enqueue_admin_scripts($hook) {
             return;
         }
         
+        if (!$this->check_rate_limit($user_id)) {
+            wp_send_json_error(array('message' => 'Daily limit reached (5 articles/day)'));
+            return;
+        }
+        
         $post_id = wp_insert_post(array(
             'post_title' => $title,
             'post_content' => $content,
@@ -721,6 +750,8 @@ public function enqueue_admin_scripts($hook) {
         update_post_meta($post_id, '_simbe1_location', $location);
         update_post_meta($post_id, '_simbe1_style', $style);
         
+        $this->track_generation($user_id, $post_id, $source_url, $title, $style, isset($_POST['used_ai']));
+        
         wp_send_json_success(array(
             'message' => 'Article saved as draft!',
             'post_id' => $post_id,
@@ -730,35 +761,32 @@ public function enqueue_admin_scripts($hook) {
     
 
     
-    public function add_action_links($links) {
-        $settings_link = '<a href="' . admin_url('admin.php?page=simbe1-articles-settings') . '">Settings</a>';
-        array_unshift($links, $settings_link);
-        return $links;
-    }
-
     // Render admin page
     public function render_admin_page() {
+        $user_id = get_current_user_id();
+        $today_count = $this->get_today_count($user_id);
+        $remaining = $this->daily_limit - $today_count;
         $api_key = $this->get_api_key();
         ?>
-        <div class="wrap simbe-wrap">
-            <h1 class="simbe-header">Article Generator</h1>
+        <div class="wrap" style="max-width: 1200px;">
+            <h1 style="margin-bottom: 30px;">Article Generator</h1>
             
-            <?php if ($this->is_ai_enabled()): ?>
-            <div class="simbe-status simbe-status-enabled">
-                <span class="dashicons dashicons-yes-alt"></span> AI Enabled
+            <div style="background: <?php echo $remaining > 0 ? '#e8f5e9' : '#ffebee'; ?>; border: 1px solid <?php echo $remaining > 0 ? '#4caf50' : '#f44336'; ?>; border-radius: 8px; padding: 15px 20px; margin-bottom: 20px;">
+                <strong>Articles today: <?php echo esc_html($today_count); ?>/<?php echo esc_html($this->daily_limit); ?></strong>
+                <?php if ($this->is_ai_enabled()): ?>
+                <span style="margin-left: 20px; color: #4caf50;"><i class="fas fa-robot"></i> AI Enabled</span>
+                <?php else: ?>
+                <span style="margin-left: 20px; color: #999;"><i class="fas fa-robot"></i> Templates Only</span>
+                <?php endif; ?>
             </div>
-            <?php else: ?>
-            <div class="simbe-status simbe-status-disabled">
-                <span class="dashicons dashicons-admin-generic"></span> Templates Only
-            </div>
-            <?php endif; ?>
             
-            <div class="simbe-grid">
-                <div class="simbe-card">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px;">
+                <div style="background: #fff; padding: 30px; border-radius: 12px;">
                     <h2>Generate Article</h2>
                     
-                    <div class="simbe-radio-group">
-                        <label>
+                    <!-- Input Mode -->
+                    <div style="margin-bottom: 15px;">
+                        <label style="margin-right: 20px;">
                             <input type="radio" name="input_mode" value="topic" checked onchange="toggleInputMode()"> Topic/Title
                         </label>
                         <label>
@@ -767,118 +795,120 @@ public function enqueue_admin_scripts($hook) {
                     </div>
                     
                     <div id="de-topic-input">
-                        <div class="simbe-field">
-                            <label class="simbe-label">Article Topic/Title</label>
-                            <input type="text" id="de-topic" class="simbe-input" placeholder="e.g., Digital Marketing, How to Learn Python">
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Article Topic/Title</label>
+                            <input type="text" id="de-topic" placeholder="e.g., Digital Marketing, How to Learn Python" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                         </div>
                     </div>
                     
                     <div id="de-url-input" style="display: none;">
-                        <div class="simbe-field">
-                            <label class="simbe-label">Reference URL</label>
-                            <div class="simbe-url-row">
-                                <input type="url" id="de-url" class="simbe-input" placeholder="https://example.com/article">
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Reference URL</label>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="url" id="de-url" placeholder="https://example.com/article" style="flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                                 <button type="button" onclick="fetchUrl()" class="button">Fetch</button>
                             </div>
-                            <p class="simbe-hint">Paste a URL to rewrite with unique structure</p>
+                            <p style="font-size: 12px; color: #666; margin-top: 5px;">Paste a URL to rewrite with unique structure</p>
                         </div>
-                        <div id="de-url-preview" class="simbe-url-preview" style="display: none;">
+                        <div id="de-url-preview" style="display: none; background: #f9f9f9; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
                             <strong id="de-url-title"></strong>
                         </div>
-                        <div class="simbe-field">
-                            <label class="simbe-label">Your Topic (to rewrite as)</label>
-                            <input type="text" id="de-rewrite-topic" class="simbe-input" placeholder="Your version of the topic">
+                        <div style="margin-bottom: 15px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Your Topic (to rewrite as)</label>
+                            <input type="text" id="de-rewrite-topic" placeholder="Your version of the topic" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                         </div>
                     </div>
                     
-                    <div class="simbe-field">
-                        <label class="simbe-label">Article Style</label>
-                        <select id="de-style" class="simbe-select">
+                    <div style="margin-bottom: 15px;">
+                        <label style="display: block; font-weight: 600; margin-bottom: 5px;">Article Style</label>
+                        <select id="de-style" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                             <?php foreach ($this->styles as $key => $style): ?>
                             <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($style['name']); ?> - <?php echo esc_html($style['desc']); ?></option>
                             <?php endforeach; ?>
                         </select>
                     </div>
                     
-                    <div class="simbe-half-grid">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
                         <div>
-                            <label class="simbe-label">Length</label>
-                            <select id="de-length" class="simbe-select">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Length</label>
+                            <select id="de-length" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                                 <option value="short">Short (~800 words)</option>
                                 <option value="medium" selected>Medium (~1500 words)</option>
                                 <option value="long">Long (~2500 words)</option>
                             </select>
                         </div>
                         <div>
-                            <label class="simbe-label">Location (GEO)</label>
-                            <input type="text" id="de-location" class="simbe-input" placeholder="e.g., New York, USA">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Location (GEO)</label>
+                            <input type="text" id="de-location" placeholder="e.g., New York, USA" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;">
                         </div>
                     </div>
                     
-                    <button onclick="generateArticle()" class="button button-primary button-large simbe-btn-full">
+                    <button onclick="generateArticle()" class="button button-primary button-large" style="width: 100%; padding: 15px;" <?php echo $remaining <= 0 ? 'disabled' : ''; ?>>
                         Generate Article
                     </button>
                 </div>
                 
-                <div class="simbe-card">
+                <div style="background: #fff; padding: 30px; border-radius: 12px;">
                     <h2>Preview</h2>
                     
-                    <div id="de-preview-placeholder" class="simbe-placeholder">
-                        <span class="dashicons dashicons-media-document"></span>
+                    <div id="de-preview-placeholder" style="text-align: center; padding: 60px 20px; color: #999;">
+                        <i class="fas fa-file-alt" style="font-size: 48px;"></i>
                         <p>Generated article will appear here</p>
                     </div>
                     
                     <div id="de-preview-content" style="display: none;">
-                        <div class="simbe-field">
-                            <label class="simbe-label">Cover Image</label>
-                            <div class="simbe-cover-box">
-                                <img id="de-cover-img" class="simbe-cover-img" src="" style="display: none;">
+                        <!-- Cover Image -->
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Cover Image</label>
+                            <div id="de-cover-preview" style="background: #f9f9f9; border: 2px dashed #ddd; border-radius: 8px; padding: 20px; text-align: center; min-height: 100px; display: flex; align-items: center; justify-content: center; flex-direction: column;">
+                                <img id="de-cover-img" src="" style="max-width: 100%; max-height: 150px; display: none; border-radius: 8px;">
                                 <div id="de-cover-placeholder">
-                                    <span class="dashicons dashicons-format-image"></span>
+                                    <i class="fas fa-image" style="font-size: 32px; color: #ccc;"></i>
                                     <p style="color: #999; font-size: 13px;">No image selected</p>
                                 </div>
                             </div>
-                            <div class="simbe-btn-row">
+                            <div style="display: flex; gap: 10px; margin-top: 10px;">
                                 <button type="button" onclick="openMediaLibrary()" class="button">
-                                    <span class="dashicons dashicons-upload" style="vertical-align: middle;"></span> Select Image
+                                    <i class="fas fa-upload"></i> Select Image
                                 </button>
                                 <button type="button" onclick="removeCover()" class="button" id="de-remove-cover" style="display: none;">
-                                    <span class="dashicons dashicons-trash" style="vertical-align: middle;"></span> Remove
+                                    <i class="fas fa-trash"></i> Remove
                                 </button>
                                 <input type="hidden" id="de-cover-id" value="">
                             </div>
                         </div>
                         
-                        <div class="simbe-field">
-                            <label class="simbe-label">Title</label>
-                            <input type="text" id="de-article-title" class="simbe-title-input">
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Title</label>
+                            <input type="text" id="de-article-title" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px;">
                         </div>
                         
+                        <!-- SEO Section -->
                         <details style="margin-bottom: 20px;" open>
                             <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: #f9f9f9; border-radius: 8px;">SEO Settings</summary>
-                            <div class="simbe-seo-box">
-                                <div class="simbe-seo-field">
-                                    <label class="simbe-seo-label">Focus Keyword</label>
-                                    <input type="text" id="de-focus-keyword" class="simbe-seo-input">
+                            <div style="padding: 15px; border: 1px solid #eee; border-radius: 0 0 8px 8px;">
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: block; font-size: 12px; color: #666;">Focus Keyword</label>
+                                    <input type="text" id="de-focus-keyword" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                                 </div>
-                                <div class="simbe-seo-field">
-                                    <label class="simbe-seo-label">Meta Description</label>
-                                    <textarea id="de-meta-desc" rows="2" class="simbe-seo-input"></textarea>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: block; font-size: 12px; color: #666;">Meta Description</label>
+                                    <textarea id="de-meta-desc" rows="2" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;"></textarea>
                                 </div>
                                 <div>
-                                    <label class="simbe-seo-label">Meta Keywords (comma separated)</label>
-                                    <input type="text" id="de-meta-keywords" class="simbe-seo-input">
+                                    <label style="display: block; font-size: 12px; color: #666;">Meta Keywords (comma separated)</label>
+                                    <input type="text" id="de-meta-keywords" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                                 </div>
                             </div>
                         </details>
                         
-                        <div class="simbe-field">
-                            <label class="simbe-label">Content</label>
-                            <div id="de-article-content" class="simbe-content-box"></div>
+                        <div style="margin-bottom: 20px;">
+                            <label style="display: block; font-weight: 600; margin-bottom: 5px;">Content</label>
+                            <div id="de-article-content" style="background: #f9f9f9; padding: 20px; border-radius: 8px; max-height: 300px; overflow-y: auto;"></div>
                         </div>
                         
-                        <button onclick="saveArticle()" class="button button-primary simbe-btn-full">
-                            <span class="dashicons dashicons-save" style="vertical-align: middle;"></span> Save as Draft
+                        <button onclick="saveArticle()" class="button button-primary" style="width: 100%; padding: 15px;">
+                            <i class="fas fa-save"></i> Save as Draft
                         </button>
                     </div>
                 </div>
@@ -899,7 +929,7 @@ public function enqueue_admin_scripts($hook) {
             <form method="post" action="options.php">
                 <?php settings_fields('simbe1_articles_settings'); ?>
                 
-                <div class="simbe-settings-card">
+                <div style="background: #fff; padding: 20px; border-radius: 12px; margin: 20px 0;">
                     <h2>Groq AI (Optional)</h2>
                     <p>Add your Groq API key for AI-generated articles. Free tier: 14,000 requests/month.</p>
                     
@@ -907,7 +937,7 @@ public function enqueue_admin_scripts($hook) {
                         <tr>
                             <th>API Key</th>
                             <td>
-                                <input type="password" name="simbe1_articles_options[groq_api_key]" value="<?php echo esc_attr($options['groq_api_key'] ?? ''); ?>" class="simbe-api-input">
+                                <input type="password" name="simbe1_articles_options[groq_api_key]" value="<?php echo esc_attr($options['groq_api_key'] ?? ''); ?>" style="width: 400px;">
                                 <p class="description">Get free key at <a href="https://console.groq.com" target="_blank">console.groq.com</a></p>
                             </td>
                         </tr>
