@@ -3,9 +3,9 @@ Contributors: simbe1
 Donate link: https://paypal.me/HBesim
 Tags: AI, article generator, content, SEO, GEO
 Requires at least: 5.0
-Tested up to: 6.9
+Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.0.1
+Stable tag: 4.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,28 +21,13 @@ Simbe AI Article Generator helps you create high-quality, SEO-optimized articles
 * **SEO Optimized**: Generates title, meta description, and structured content
 * **GEO Targeting**: Add location context to your articles
 * **AI Integration**: Optional Groq API for enhanced AI-generated content (free tier available)
-* **Rate Limiting**: Built-in 5 articles/day limit per user
+* **Rate Limiting**: No limit per user.
 * **Draft Publishing**: Save directly to WordPress as drafts
 * **Featured Images**: Select cover images from Media Library
 
-= How It Works =
+= External Services =
 
-1. Enter your article topic or paste a reference URL
-2. Select an article style that fits your content needs
-3. Choose length (short, medium, or long)
-4. Optionally add location for GEO targeting
-5. Generate and preview your article
-6. Edit and save as draft to WordPress
-
-= AI Integration =
-
-The plugin works with or without AI. When a Groq API key is provided, it uses AI to generate more unique and contextually relevant content. Groq offers a free tier with 14,000 requests per month.
-
-== External Services ==
-
-This plugin connects to an external AI service to generate articles when the Groq API key is provided.
-
-**Groq API** is used for AI-powered article generation. It processes the article topic, selected style, and user preferences to generate unique, SEO-optimized content.
+This plugin optionally connects to the Groq API to generate AI-powered articles when the user configures a Groq API key in the plugin settings.
 
 What data is sent:
 - Article topic/title
@@ -56,8 +41,21 @@ When is data sent:
 - Only when the Groq API key is configured in plugin settings
 
 Service provided by: Groq, Inc.
-Terms of Service: https://console.groq.com/terms
-Privacy Policy: https://console.groq.com/privacy
+Terms of Service: https://groq.com/terms-of-use
+Privacy Policy: https://groq.com/privacy-policy
+
+= How It Works =
+
+1. Enter your article topic or paste a reference URL
+2. Select an article style that fits your content needs
+3. Choose length (short, medium, or long)
+4. Optionally add location for GEO targeting
+5. Generate and preview your article
+6. Edit and save as draft to WordPress
+
+= AI Integration =
+
+The plugin works with or without AI. When a Groq API key is provided, it uses AI to generate more unique and contextually relevant content. Groq offers a free tier with 14,000 requests per month.
 
 == Installation ==
 
@@ -93,7 +91,7 @@ The plugin offers 15 styles:
 
 = What's the daily limit? =
 
-By default, users can generate 5 articles per day. This can be adjusted in the code if needed.
+By default, users can generate unlimited post per day. 
 
 = Is the content original? =
 
@@ -107,6 +105,14 @@ Yes, the generated content is unique. When using AI, each generation produces di
 
 == Changelog ==
 
+= 4.1.0 =
+* Replaced Font Awesome with built-in Dashicons (faster, no external requests)
+* Moved inline styles to CSS file for cleaner code
+* Added Settings link on Plugins page
+* Surface Groq API error messages in UI
+* Removed Font Awesome CDN dependency
+* Code cleanup and optimization
+
 = 4.0.0 =
 * Complete UI redesign
 * Added 15 article styles
@@ -119,6 +125,9 @@ Yes, the generated content is unique. When using AI, each generation produces di
 * Initial release
 
 == Upgrade Notice ==
+
+= 4.1.0 =
+Improved code quality - removed external Font Awesome dependency, moved to Dashicons. No breaking changes.
 
 = 4.0.0 =
 Major update with new UI and 15 article styles. Please backup your settings before upgrading.
