@@ -1,0 +1,13 @@
+# SVN checkout (wordpress.org)
+simbe-ai-article-generator/
+
+# Old version archives
+/4.1.0/
+
+# Aux files
+.freebuff/
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.swp

@@ -5,7 +5,7 @@ Tags: AI, article generator, content, SEO, GEO
 Requires at least: 5.0
 Tested up to: 7.0
 Requires PHP: 7.4
-Stable tag: 4.1.0
+Stable tag: 4.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,7 +21,9 @@ Simbe AI Article Generator helps you create high-quality, SEO-optimized articles
 * **SEO Optimized**: Generates title, meta description, and structured content
 * **GEO Targeting**: Add location context to your articles
 * **AI Integration**: Optional Groq API for enhanced AI-generated content (free tier available)
-* **Rate Limiting**: No limit per user.
+* **Model Selection**: Choose your Groq AI model in Settings
+* **Front-End SEO**: Saved meta description, keywords, and Open Graph tags are output automatically
+* **Generation Tracking**: See how many articles you've generated (with and without AI)
 * **Draft Publishing**: Save directly to WordPress as drafts
 * **Featured Images**: Select cover images from Media Library
 
@@ -105,6 +107,21 @@ Yes, the generated content is unique. When using AI, each generation produces di
 
 == Changelog ==
 
+= 4.2.0 =
+* NEW: Fully redesigned, modern Settings page with gradient header and connection status
+* NEW: "Test Connection" button to verify your Groq API key from Settings
+* NEW: Front-end SEO output - meta description, keywords, and Open Graph tags on posts
+* NEW: Choose your Groq AI model in Settings
+* FIX: User edits to the generated article are now saved (editable content box)
+* FIX: Meta keywords and source URL are now saved with the article
+* FIX: Meta description is also stored as the post excerpt
+* IMPROVE: Retry with backoff when Groq rate-limits or returns server errors
+* IMPROVE: Generation tracking now records every article (with AI usage flag)
+* IMPROVE: URL fetching blocks private/internal hosts (SSRF protection)
+* TUNE: Dynamic year in Trend-style meta descriptions
+* TUNE: Admin UI strings are translation-ready
+* REMOVE: Dead code (leftover DigitalEdu script, empty stylesheet)
+
 = 4.1.0 =
 * Replaced Font Awesome with built-in Dashicons (faster, no external requests)
 * Moved inline styles to CSS file for cleaner code
@@ -125,6 +142,9 @@ Yes, the generated content is unique. When using AI, each generation produces di
 * Initial release
 
 == Upgrade Notice ==
+
+= 4.2.0 =
+Adds front-end SEO output, model selection, save fixes, and generation tracking. No breaking changes.
 
 = 4.1.0 =
 Improved code quality - removed external Font Awesome dependency, moved to Dashicons. No breaking changes.

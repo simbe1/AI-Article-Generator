@@ -3,7 +3,7 @@
  * Plugin Name: Simbe AI Article Generator
  * Plugin URI: https://investoryspot.com/plugins
  * Description: Generate SEO & GEO optimized articles with 15 styles + optional Groq AI.
- * Version: 4.1.0
+ * Version: 4.2.0
  * Requires at least: 5.0
  * Tested up to: 7.0
  * Requires PHP: 7.4
@@ -39,7 +39,7 @@ register_activation_hook(__FILE__, 'simbe1_article_generator_activate');
 
 class SimbeAI_Article_Generator {
     
-    private $version = '4.1.0';
+    private $version = '4.2.0';
     private $styles = array();
     private $last_ai_error = '';
     
@@ -50,8 +50,10 @@ class SimbeAI_Article_Generator {
         add_action('wp_ajax_simbe1_generate_article', array($this, 'ajax_generate_article'));
         add_action('wp_ajax_simbe1_save_article', array($this, 'ajax_save_article'));
         add_action('wp_ajax_simbe1_fetch_url', array($this, 'ajax_fetch_url'));
+        add_action('wp_ajax_simbe1_test_api', array($this, 'ajax_test_api'));
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
         add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_action_links'));
+        add_action('wp_head', array($this, 'output_seo_meta'), 5);
     }
     
 public function enqueue_admin_scripts($hook) {
@@ -79,7 +81,17 @@ public function enqueue_admin_scripts($hook) {
 
         wp_localize_script('simbe1-article-generator', 'simbe1Ajax', array(
             'ajaxurl' => admin_url('admin-ajax.php'),
-            'nonce' => wp_create_nonce('simbe1ajax_nonce')
+            'nonce' => wp_create_nonce('simbe1ajax_nonce'),
+            'strings' => array(
+                'fetch' => __('Fetch', 'simbe-ai-article-generator'),
+                'enterUrl' => __('Please enter a URL', 'simbe-ai-article-generator'),
+                'enterTopic' => __('Please enter a topic', 'simbe-ai-article-generator'),
+                'fetching' => __('Fetching...', 'simbe-ai-article-generator'),
+                'generating' => __('Generating...', 'simbe-ai-article-generator'),
+                'generateArticle' => __('Generate Article', 'simbe-ai-article-generator'),
+                'savedDraft' => __('Article saved as draft!', 'simbe-ai-article-generator'),
+                'testing' => __('Testing connection...', 'simbe-ai-article-generator'),
+            )
         ));
     }
     
@@ -196,6 +208,12 @@ public function enqueue_admin_scripts($hook) {
         if (isset($options['groq_api_key'])) {
             $clean['groq_api_key'] = sanitize_text_field($options['groq_api_key']);
         }
+        $models = $this->get_models();
+        if (isset($options['model']) && isset($models[$options['model']])) {
+            $clean['model'] = $options['model'];
+        } else {
+            $clean['model'] = 'llama-3.1-8b-instant';
+        }
         return $clean;
     }
     
@@ -203,6 +221,24 @@ public function enqueue_admin_scripts($hook) {
     private function get_api_key() {
         $options = get_option('simbe1_articles_options', array());
         return sanitize_text_field($options['groq_api_key'] ?? '');
+    }
+
+    // Available Groq models (production models on GroqCloud)
+    private function get_models() {
+        return array(
+            'llama-3.3-70b-versatile' => 'Llama 3.3 70B (Recommended)',
+            'llama-3.1-8b-instant'    => 'Llama 3.1 8B (Fast)',
+            'openai/gpt-oss-120b'     => 'OpenAI GPT-OSS 120B',
+            'openai/gpt-oss-20b'      => 'OpenAI GPT-OSS 20B (Fastest)',
+        );
+    }
+
+    // Get the selected model with a safe fallback
+    private function get_model() {
+        $options = get_option('simbe1_articles_options', array());
+        $model = sanitize_text_field($options['model'] ?? 'llama-3.1-8b-instant');
+        $models = $this->get_models();
+        return isset($models[$model]) ? $model : 'llama-3.1-8b-instant';
     }
     
     // Check if Groq is configured
@@ -232,35 +268,69 @@ public function enqueue_admin_scripts($hook) {
         
         $prompt .= "\nOutput format:\nTITLE: [title]\nMETA: [meta description]\nCONTENT: [full article in HTML]";
         
-        $response = wp_remote_post('https://api.groq.com/openai/v1/chat/completions', array(
-            'headers' => array(
-                'Authorization' => 'Bearer ' . $api_key,
-                'Content-Type' => 'application/json'
-            ),
-            'body' => json_encode(array(
-                'model' => 'llama-3.1-8b-instant',
-                'messages' => array(
-                    array('role' => 'system', 'content' => 'You are an expert content writer. Write engaging, SEO-optimized articles.'),
-                    array('role' => 'user', 'content' => $prompt)
+        $api_url = 'https://api.groq.com/openai/v1/chat/completions';
+        $max_attempts = 3;
+        $attempt = 0;
+        $backoff = 2;
+
+        do {
+            $attempt++;
+            $response = wp_remote_post($api_url, array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $api_key,
+                    'Content-Type' => 'application/json'
                 ),
-                'temperature' => 0.7,
-                'max_tokens' => 4000
-            )),
-            'timeout' => 60
-        ));
-        
-        if (is_wp_error($response)) {
-            $this->last_ai_error = $response->get_error_message();
-            return false;
-        }
-        
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        
-        if (!empty($body['error']['message'])) {
-            $this->last_ai_error = $body['error']['message'];
-            return false;
-        }
-        
+                'body' => json_encode(array(
+                    'model' => $this->get_model(),
+                    'messages' => array(
+                        array('role' => 'system', 'content' => 'You are an expert content writer. Write engaging, SEO-optimized articles.'),
+                        array('role' => 'user', 'content' => $prompt)
+                    ),
+                    'temperature' => 0.7,
+                    'max_tokens' => 4000
+                )),
+                'timeout' => 60
+            ));
+
+            if (is_wp_error($response)) {
+                if ($attempt < $max_attempts) {
+                    sleep($backoff);
+                    $backoff *= 2;
+                    continue;
+                }
+                $this->last_ai_error = $response->get_error_message();
+                return false;
+            }
+
+            $status = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+
+            // Retry on rate limits and server errors with exponential backoff.
+            if ($status === 429 || $status >= 500) {
+                if ($attempt < $max_attempts) {
+                    $retry_after = (int) wp_remote_retrieve_header($response, 'retry-after');
+                    $wait = ($retry_after > 0 && $retry_after <= 30) ? $retry_after : $backoff;
+                    sleep($wait);
+                    $backoff *= 2;
+                    continue;
+                }
+                $this->last_ai_error = $body['error']['message'] ?? 'HTTP ' . $status;
+                return false;
+            }
+
+            if ($status !== 200) {
+                $this->last_ai_error = $body['error']['message'] ?? 'HTTP ' . $status;
+                return false;
+            }
+
+            if (!empty($body['error']['message'])) {
+                $this->last_ai_error = $body['error']['message'];
+                return false;
+            }
+
+            break;
+        } while (true);
+
         $content = $body['choices'][0]['message']['content'] ?? '';
         
         if (empty($content)) {
@@ -559,7 +629,7 @@ public function enqueue_admin_scripts($hook) {
             'explainer' => "{$subject} explained in simple terms. No jargon, just clear explanations.",
             'case_study' => "Case study on {$subject}. Real results and practical lessons.",
             'comparison' => "{$subject} compared. See the pros and cons side by side.",
-            'trend' => "{$subject} trends for 2026. What's shaping the future.",
+            'trend' => "{$subject} trends for " . gmdate('Y') . ". What's shaping the future.",
             'problem_solution' => "Solutions for {$subject} challenges. Practical fixes that work.",
             'beginner' => "{$subject} for beginners. Start here with this easy guide.",
             'advanced' => "Advanced {$subject} strategies. Take your skills to the next level.",
@@ -594,12 +664,81 @@ public function enqueue_admin_scripts($hook) {
     
     
     
+    // Output saved SEO meta tags on the front end
+    public function output_seo_meta() {
+        if (!is_singular()) {
+            return;
+        }
+
+        $post_id = get_queried_object_id();
+        if (!$post_id) {
+            return;
+        }
+
+        $meta_description = get_post_meta($post_id, '_simbe1_meta_description', true);
+        if (empty($meta_description)) {
+            $meta_description = get_the_excerpt($post_id);
+        }
+        $meta_description = trim(preg_replace('/\s+/', ' ', wp_strip_all_tags((string) $meta_description)));
+        $meta_keywords    = get_post_meta($post_id, '_simbe1_meta_keywords', true);
+
+        if (!empty($meta_description)) {
+            echo '<meta name="description" content="' . esc_attr($meta_description) . '" />' . "\n";
+        }
+        if (!empty($meta_keywords)) {
+            echo '<meta name="keywords" content="' . esc_attr($meta_keywords) . '" />' . "\n";
+        }
+
+        $post     = get_post($post_id);
+        $og_title = $post ? $post->post_title : '';
+        $og_url   = get_permalink($post_id);
+        $og_image = get_the_post_thumbnail_url($post_id, 'large');
+
+        echo '<meta property="og:type" content="article" />' . "\n";
+        if ($og_title) {
+            echo '<meta property="og:title" content="' . esc_attr($og_title) . '" />' . "\n";
+        }
+        if ($meta_description) {
+            echo '<meta property="og:description" content="' . esc_attr($meta_description) . '" />' . "\n";
+        }
+        if ($og_url) {
+            echo '<meta property="og:url" content="' . esc_url($og_url) . '" />' . "\n";
+        }
+        if ($og_image) {
+            echo '<meta property="og:image" content="' . esc_url($og_image) . '" />' . "\n";
+        }
+    }
+
+    // Block requests to private/internal hosts (SSRF guard)
+    private function is_private_host($host) {
+        $ip = gethostbyname($host);
+        if ($ip === $host && !filter_var($ip, FILTER_VALIDATE_IP)) {
+            return true;
+        }
+        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+    }
+
+    // Usage stats from the tracking table
+    private function get_usage_stats() {
+        global $wpdb;
+        $table = $wpdb->prefix . 'simbe1_article_tracking';
+        $exists = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+        if ($exists !== $table) {
+            return array('total' => 0, 'ai' => 0, 'saved' => 0);
+        }
+        return array(
+            'total' => (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}"), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            'ai'    => (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE used_ai = 1"), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+            'saved' => (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE post_id IS NOT NULL AND post_id > 0"), // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+        );
+    }
+
 // AJAX: Generate article
     public function ajax_generate_article() {
         check_ajax_referer('simbe1ajax_nonce', 'security');
         
         if (!current_user_can('edit_posts')) {
-            wp_send_json_error(array('message' => 'Permission denied'));
+            wp_send_json_error(array('message' => __('Permission denied', 'simbe-ai-article-generator')));
             return;
         }
         
@@ -607,9 +746,10 @@ public function enqueue_admin_scripts($hook) {
         $style = sanitize_text_field(wp_unslash($_POST['style'] ?? 'guide'));
         $length = sanitize_text_field(wp_unslash($_POST['length'] ?? 'medium'));
         $location = sanitize_text_field(wp_unslash($_POST['location'] ?? ''));
+        $source_url = esc_url_raw(wp_unslash($_POST['source_url'] ?? ''));
         
         if (empty($topic)) {
-            wp_send_json_error(array('message' => 'Please enter a topic'));
+            wp_send_json_error(array('message' => __('Please enter a topic', 'simbe-ai-article-generator')));
             return;
         }
         
@@ -619,7 +759,7 @@ public function enqueue_admin_scripts($hook) {
         if ($this->is_ai_enabled()) {
             $article = $this->generate_with_ai($topic, $style, $length, $location);
             if ($article === false && !empty($this->last_ai_error)) {
-                wp_send_json_error(array('message' => 'AI Error: ' . $this->last_ai_error));
+                wp_send_json_error(array('message' => __('AI Error: ', 'simbe-ai-article-generator') . $this->last_ai_error));
                 return;
             }
             $used_ai = ($article !== false);
@@ -642,7 +782,22 @@ public function enqueue_admin_scripts($hook) {
         $article['style'] = $style;
         $article['word_count'] = str_word_count(wp_strip_all_tags($article['content']));
         $article['reading_time'] = ceil($article['word_count'] / 200);
-        
+
+        // Log the generation in the tracking table
+        global $wpdb;
+        $inserted = $wpdb->insert(
+            $wpdb->prefix . 'simbe1_article_tracking',
+            array(
+                'user_id'    => get_current_user_id(),
+                'source_url' => $source_url,
+                'topic'      => $topic,
+                'style'      => $style,
+                'used_ai'    => $article['used_ai'] ? 1 : 0,
+            ),
+            array('%d', '%s', '%s', '%s', '%d')
+        );
+        $article['tracking_id'] = $inserted ? (int) $wpdb->insert_id : 0;
+
         wp_send_json_success($article);
     }
     
@@ -650,21 +805,30 @@ public function enqueue_admin_scripts($hook) {
         check_ajax_referer('simbe1ajax_nonce', 'security');
         
         if (!current_user_can('edit_posts')) {
-            wp_send_json_error(array('message' => 'Permission denied'));
+            wp_send_json_error(array('message' => __('Permission denied', 'simbe-ai-article-generator')));
             return;
         }
         
         $url = esc_url_raw(wp_unslash($_POST['url'] ?? ''));
         
         if (empty($url)) {
-            wp_send_json_error(array('message' => 'Please enter a valid URL'));
+            wp_send_json_error(array('message' => __('Please enter a valid URL', 'simbe-ai-article-generator')));
+            return;
+        }
+
+        // SSRF guard: only http/https to public hosts
+        $parsed = wp_parse_url($url);
+        $scheme = strtolower($parsed['scheme'] ?? '');
+        $host   = strtolower($parsed['host'] ?? '');
+        if (!in_array($scheme, array('http', 'https'), true) || empty($host) || $this->is_private_host($host)) {
+            wp_send_json_error(array('message' => __('URL is not allowed', 'simbe-ai-article-generator')));
             return;
         }
         
         $response = wp_remote_get($url, array('timeout' => 15));
         
         if (is_wp_error($response)) {
-            wp_send_json_error(array('message' => 'Could not fetch URL'));
+            wp_send_json_error(array('message' => __('Could not fetch URL', 'simbe-ai-article-generator')));
             return;
         }
         
@@ -682,7 +846,7 @@ public function enqueue_admin_scripts($hook) {
         check_ajax_referer('simbe1ajax_nonce', 'security');
         
         if (!current_user_can('edit_posts')) {
-            wp_send_json_error(array('message' => 'Permission denied'));
+            wp_send_json_error(array('message' => __('Permission denied', 'simbe-ai-article-generator')));
             return;
         }
         
@@ -695,15 +859,18 @@ public function enqueue_admin_scripts($hook) {
         $style = sanitize_text_field(wp_unslash($_POST['style'] ?? 'guide'));
         $source_url = esc_url_raw(wp_unslash($_POST['source_url'] ?? ''));
         $cover_id = intval($_POST['cover_id'] ?? 0);
+        $meta_keywords = sanitize_text_field(wp_unslash($_POST['meta_keywords'] ?? ''));
+        $tracking_id = intval($_POST['tracking_id'] ?? 0);
         
         if (empty($title) || empty($content)) {
-            wp_send_json_error(array('message' => 'Title and content are required'));
+            wp_send_json_error(array('message' => __('Title and content are required', 'simbe-ai-article-generator')));
             return;
         }
         
         $post_id = wp_insert_post(array(
             'post_title' => $title,
             'post_content' => $content,
+            'post_excerpt' => $meta_description,
             'post_status' => 'draft',
             'post_author' => $user_id
         ));
@@ -718,11 +885,27 @@ public function enqueue_admin_scripts($hook) {
         }
         
         update_post_meta($post_id, '_simbe1_meta_description', $meta_description);
+        update_post_meta($post_id, '_simbe1_meta_keywords', $meta_keywords);
         update_post_meta($post_id, '_simbe1_location', $location);
         update_post_meta($post_id, '_simbe1_style', $style);
+        if (!empty($source_url)) {
+            update_post_meta($post_id, '_simbe1_source_url', $source_url);
+        }
+        
+        // Link the tracked generation to the saved post
+        if ($tracking_id > 0) {
+            global $wpdb;
+            $wpdb->update(
+                $wpdb->prefix . 'simbe1_article_tracking',
+                array('post_id' => $post_id),
+                array('id' => $tracking_id, 'user_id' => $user_id),
+                array('%d'),
+                array('%d', '%d')
+            );
+        }
         
         wp_send_json_success(array(
-            'message' => 'Article saved as draft!',
+            'message' => __('Article saved as draft!', 'simbe-ai-article-generator'),
             'post_id' => $post_id,
             'edit_url' => get_edit_post_link($post_id)
         ));
@@ -731,7 +914,7 @@ public function enqueue_admin_scripts($hook) {
 
     
     public function add_action_links($links) {
-        $settings_link = '<a href="' . admin_url('admin.php?page=simbe1-articles-settings') . '">Settings</a>';
+        $settings_link = '<a href="' . admin_url('admin.php?page=simbe1-articles-settings') . '">' . esc_html__('Settings', 'simbe-ai-article-generator') . '</a>';
         array_unshift($links, $settings_link);
         return $links;
     }
@@ -741,58 +924,74 @@ public function enqueue_admin_scripts($hook) {
         $api_key = $this->get_api_key();
         ?>
         <div class="wrap simbe-wrap">
-            <h1 class="simbe-header">Article Generator</h1>
+            <h1 class="simbe-header"><?php esc_html_e('Article Generator', 'simbe-ai-article-generator'); ?></h1>
             
             <?php if ($this->is_ai_enabled()): ?>
             <div class="simbe-status simbe-status-enabled">
-                <span class="dashicons dashicons-yes-alt"></span> AI Enabled
+                <span class="dashicons dashicons-yes-alt"></span> <?php esc_html_e('AI Enabled', 'simbe-ai-article-generator'); ?>
             </div>
             <?php else: ?>
             <div class="simbe-status simbe-status-disabled">
-                <span class="dashicons dashicons-admin-generic"></span> Templates Only
+                <span class="dashicons dashicons-admin-generic"></span> <?php esc_html_e('Templates Only', 'simbe-ai-article-generator'); ?>
             </div>
             <?php endif; ?>
             
+            <?php $usage = $this->get_usage_stats(); ?>
+            <div class="simbe-usage-grid">
+                <div class="simbe-usage-card">
+                    <span class="simbe-usage-value"><?php echo esc_html($usage['total']); ?></span>
+                    <span class="simbe-usage-label"><?php esc_html_e('Articles Generated', 'simbe-ai-article-generator'); ?></span>
+                </div>
+                <div class="simbe-usage-card">
+                    <span class="simbe-usage-value"><?php echo esc_html($usage['ai']); ?></span>
+                    <span class="simbe-usage-label"><?php esc_html_e('With AI', 'simbe-ai-article-generator'); ?></span>
+                </div>
+                <div class="simbe-usage-card">
+                    <span class="simbe-usage-value"><?php echo esc_html($usage['saved']); ?></span>
+                    <span class="simbe-usage-label"><?php esc_html_e('Saved as Drafts', 'simbe-ai-article-generator'); ?></span>
+                </div>
+            </div>
+            
             <div class="simbe-grid">
                 <div class="simbe-card">
-                    <h2>Generate Article</h2>
+                    <h2><?php esc_html_e('Generate Article', 'simbe-ai-article-generator'); ?></h2>
                     
                     <div class="simbe-radio-group">
                         <label>
-                            <input type="radio" name="input_mode" value="topic" checked onchange="toggleInputMode()"> Topic/Title
+                            <input type="radio" name="input_mode" value="topic" checked onchange="toggleInputMode()"> <?php esc_html_e('Topic/Title', 'simbe-ai-article-generator'); ?>
                         </label>
                         <label>
-                            <input type="radio" name="input_mode" value="url" onchange="toggleInputMode()"> Reference URL
+                            <input type="radio" name="input_mode" value="url" onchange="toggleInputMode()"> <?php esc_html_e('Reference URL', 'simbe-ai-article-generator'); ?>
                         </label>
                     </div>
                     
                     <div id="de-topic-input">
                         <div class="simbe-field">
-                            <label class="simbe-label">Article Topic/Title</label>
-                            <input type="text" id="de-topic" class="simbe-input" placeholder="e.g., Digital Marketing, How to Learn Python">
+                            <label class="simbe-label"><?php esc_html_e('Article Topic/Title', 'simbe-ai-article-generator'); ?></label>
+                            <input type="text" id="de-topic" class="simbe-input" placeholder="<?php esc_attr_e('e.g., Digital Marketing, How to Learn Python', 'simbe-ai-article-generator'); ?>">
                         </div>
                     </div>
                     
                     <div id="de-url-input" style="display: none;">
                         <div class="simbe-field">
-                            <label class="simbe-label">Reference URL</label>
+                            <label class="simbe-label"><?php esc_html_e('Reference URL', 'simbe-ai-article-generator'); ?></label>
                             <div class="simbe-url-row">
                                 <input type="url" id="de-url" class="simbe-input" placeholder="https://example.com/article">
-                                <button type="button" onclick="fetchUrl()" class="button">Fetch</button>
+                                <button type="button" onclick="fetchUrl(this)" class="button"><?php esc_html_e('Fetch', 'simbe-ai-article-generator'); ?></button>
                             </div>
-                            <p class="simbe-hint">Paste a URL to rewrite with unique structure</p>
+                            <p class="simbe-hint"><?php esc_html_e('Paste a URL to rewrite with unique structure', 'simbe-ai-article-generator'); ?></p>
                         </div>
                         <div id="de-url-preview" class="simbe-url-preview" style="display: none;">
                             <strong id="de-url-title"></strong>
                         </div>
                         <div class="simbe-field">
-                            <label class="simbe-label">Your Topic (to rewrite as)</label>
-                            <input type="text" id="de-rewrite-topic" class="simbe-input" placeholder="Your version of the topic">
+                            <label class="simbe-label"><?php esc_html_e('Your Topic (to rewrite as)', 'simbe-ai-article-generator'); ?></label>
+                            <input type="text" id="de-rewrite-topic" class="simbe-input" placeholder="<?php esc_attr_e('Your version of the topic', 'simbe-ai-article-generator'); ?>">
                         </div>
                     </div>
                     
                     <div class="simbe-field">
-                        <label class="simbe-label">Article Style</label>
+                        <label class="simbe-label"><?php esc_html_e('Article Style', 'simbe-ai-article-generator'); ?></label>
                         <select id="de-style" class="simbe-select">
                             <?php foreach ($this->styles as $key => $style): ?>
                             <option value="<?php echo esc_attr($key); ?>"><?php echo esc_html($style['name']); ?> - <?php echo esc_html($style['desc']); ?></option>
@@ -802,83 +1001,83 @@ public function enqueue_admin_scripts($hook) {
                     
                     <div class="simbe-half-grid">
                         <div>
-                            <label class="simbe-label">Length</label>
+                            <label class="simbe-label"><?php esc_html_e('Length', 'simbe-ai-article-generator'); ?></label>
                             <select id="de-length" class="simbe-select">
-                                <option value="short">Short (~800 words)</option>
-                                <option value="medium" selected>Medium (~1500 words)</option>
-                                <option value="long">Long (~2500 words)</option>
+                                <option value="short"><?php esc_html_e('Short (~800 words)', 'simbe-ai-article-generator'); ?></option>
+                                <option value="medium" selected><?php esc_html_e('Medium (~1500 words)', 'simbe-ai-article-generator'); ?></option>
+                                <option value="long"><?php esc_html_e('Long (~2500 words)', 'simbe-ai-article-generator'); ?></option>
                             </select>
                         </div>
                         <div>
-                            <label class="simbe-label">Location (GEO)</label>
-                            <input type="text" id="de-location" class="simbe-input" placeholder="e.g., New York, USA">
+                            <label class="simbe-label"><?php esc_html_e('Location (GEO)', 'simbe-ai-article-generator'); ?></label>
+                            <input type="text" id="de-location" class="simbe-input" placeholder="<?php esc_attr_e('e.g., New York, USA', 'simbe-ai-article-generator'); ?>">
                         </div>
                     </div>
                     
-                    <button onclick="generateArticle()" class="button button-primary button-large simbe-btn-full">
-                        Generate Article
+                    <button onclick="generateArticle(this)" class="button button-primary button-large simbe-btn-full">
+                        <?php esc_html_e('Generate Article', 'simbe-ai-article-generator'); ?>
                     </button>
                 </div>
                 
                 <div class="simbe-card">
-                    <h2>Preview</h2>
+                    <h2><?php esc_html_e('Preview', 'simbe-ai-article-generator'); ?></h2>
                     
                     <div id="de-preview-placeholder" class="simbe-placeholder">
                         <span class="dashicons dashicons-media-document"></span>
-                        <p>Generated article will appear here</p>
+                        <p><?php esc_html_e('Generated article will appear here', 'simbe-ai-article-generator'); ?></p>
                     </div>
                     
                     <div id="de-preview-content" style="display: none;">
                         <div class="simbe-field">
-                            <label class="simbe-label">Cover Image</label>
+                            <label class="simbe-label"><?php esc_html_e('Cover Image', 'simbe-ai-article-generator'); ?></label>
                             <div class="simbe-cover-box">
                                 <img id="de-cover-img" class="simbe-cover-img" src="" style="display: none;">
                                 <div id="de-cover-placeholder">
                                     <span class="dashicons dashicons-format-image"></span>
-                                    <p style="color: #999; font-size: 13px;">No image selected</p>
+                                    <p style="color: #999; font-size: 13px;"><?php esc_html_e('No image selected', 'simbe-ai-article-generator'); ?></p>
                                 </div>
                             </div>
                             <div class="simbe-btn-row">
                                 <button type="button" onclick="openMediaLibrary()" class="button">
-                                    <span class="dashicons dashicons-upload" style="vertical-align: middle;"></span> Select Image
+                                    <span class="dashicons dashicons-upload" style="vertical-align: middle;"></span> <?php esc_html_e('Select Image', 'simbe-ai-article-generator'); ?>
                                 </button>
                                 <button type="button" onclick="removeCover()" class="button" id="de-remove-cover" style="display: none;">
-                                    <span class="dashicons dashicons-trash" style="vertical-align: middle;"></span> Remove
+                                    <span class="dashicons dashicons-trash" style="vertical-align: middle;"></span> <?php esc_html_e('Remove', 'simbe-ai-article-generator'); ?>
                                 </button>
                                 <input type="hidden" id="de-cover-id" value="">
                             </div>
                         </div>
                         
                         <div class="simbe-field">
-                            <label class="simbe-label">Title</label>
+                            <label class="simbe-label"><?php esc_html_e('Title', 'simbe-ai-article-generator'); ?></label>
                             <input type="text" id="de-article-title" class="simbe-title-input">
                         </div>
                         
                         <details style="margin-bottom: 20px;" open>
-                            <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: #f9f9f9; border-radius: 8px;">SEO Settings</summary>
+                            <summary style="cursor: pointer; font-weight: 600; padding: 10px; background: #f9f9f9; border-radius: 8px;"><?php esc_html_e('SEO Settings', 'simbe-ai-article-generator'); ?></summary>
                             <div class="simbe-seo-box">
                                 <div class="simbe-seo-field">
-                                    <label class="simbe-seo-label">Focus Keyword</label>
+                                    <label class="simbe-seo-label"><?php esc_html_e('Focus Keyword', 'simbe-ai-article-generator'); ?></label>
                                     <input type="text" id="de-focus-keyword" class="simbe-seo-input">
                                 </div>
                                 <div class="simbe-seo-field">
-                                    <label class="simbe-seo-label">Meta Description</label>
+                                    <label class="simbe-seo-label"><?php esc_html_e('Meta Description', 'simbe-ai-article-generator'); ?></label>
                                     <textarea id="de-meta-desc" rows="2" class="simbe-seo-input"></textarea>
                                 </div>
                                 <div>
-                                    <label class="simbe-seo-label">Meta Keywords (comma separated)</label>
+                                    <label class="simbe-seo-label"><?php esc_html_e('Meta Keywords (comma separated)', 'simbe-ai-article-generator'); ?></label>
                                     <input type="text" id="de-meta-keywords" class="simbe-seo-input">
                                 </div>
                             </div>
                         </details>
                         
                         <div class="simbe-field">
-                            <label class="simbe-label">Content</label>
-                            <div id="de-article-content" class="simbe-content-box"></div>
+                            <label class="simbe-label"><?php esc_html_e('Content', 'simbe-ai-article-generator'); ?></label>
+                            <textarea id="de-article-content" class="simbe-content-box" rows="20"></textarea>
                         </div>
                         
                         <button onclick="saveArticle()" class="button button-primary simbe-btn-full">
-                            <span class="dashicons dashicons-save" style="vertical-align: middle;"></span> Save as Draft
+                            <span class="dashicons dashicons-save" style="vertical-align: middle;"></span> <?php esc_html_e('Save as Draft', 'simbe-ai-article-generator'); ?>
                         </button>
                     </div>
                 </div>
@@ -892,32 +1091,110 @@ public function enqueue_admin_scripts($hook) {
     // Render settings
     public function render_settings() {
         $options = get_option('simbe1_articles_options', array());
+        $api_key = $this->get_api_key();
+        $has_key = !empty($api_key);
         ?>
-        <div class="wrap">
-            <h1>Settings</h1>
-            
+        <div class="wrap simbe-settings-wrap">
+            <div class="simbe-settings-hero <?php echo $has_key ? 'is-connected' : ''; ?>">
+                <div class="simbe-settings-hero-icon">
+                    <span class="dashicons dashicons-admin-generic"></span>
+                </div>
+                <div class="simbe-settings-hero-text">
+                    <h1><?php esc_html_e('Simbe AI Article Generator', 'simbe-ai-article-generator'); ?></h1>
+                    <p><?php esc_html_e('Configure your Groq AI integration to generate smarter, SEO-ready articles.', 'simbe-ai-article-generator'); ?></p>
+                </div>
+                <div class="simbe-settings-hero-badge <?php echo $has_key ? 'badge-on' : 'badge-off'; ?>">
+                    <span class="dashicons <?php echo $has_key ? 'dashicons-yes-alt' : 'dashicons-warning'; ?>"></span>
+                    <?php echo $has_key ? esc_html__('Connected', 'simbe-ai-article-generator') : esc_html__('Not Configured', 'simbe-ai-article-generator'); ?>
+                </div>
+            </div>
+
             <form method="post" action="options.php">
                 <?php settings_fields('simbe1_articles_settings'); ?>
-                
-                <div class="simbe-settings-card">
-                    <h2>Groq AI (Optional)</h2>
-                    <p>Add your Groq API key for AI-generated articles. Free tier: 14,000 requests/month.</p>
-                    
-                    <table class="form-table">
-                        <tr>
-                            <th>API Key</th>
-                            <td>
-                                <input type="password" name="simbe1_articles_options[groq_api_key]" value="<?php echo esc_attr($options['groq_api_key'] ?? ''); ?>" class="simbe-api-input">
-                                <p class="description">Get free key at <a href="https://console.groq.com" target="_blank">console.groq.com</a></p>
-                            </td>
-                        </tr>
-                    </table>
+
+                <div class="simbe-settings-grid">
+                    <div class="simbe-settings-card">
+                        <div class="simbe-settings-card-icon">
+                            <span class="dashicons dashicons-lock"></span>
+                        </div>
+                        <h2><?php esc_html_e('Groq API Key', 'simbe-ai-article-generator'); ?></h2>
+                        <p class="simbe-settings-desc">
+                            <?php esc_html_e('Add your Groq API key to enable AI-powered article generation. Free tier includes 14,000 requests/month.', 'simbe-ai-article-generator'); ?>
+                        </p>
+                        <input type="password" name="simbe1_articles_options[groq_api_key]" value="<?php echo esc_attr($options['groq_api_key'] ?? ''); ?>" class="simbe-api-input" placeholder="gsk_...">
+                        <p class="description">
+                            <a href="https://console.groq.com" target="_blank" rel="noopener">
+                                <?php esc_html_e('Get a free key at console.groq.com', 'simbe-ai-article-generator'); ?>
+                            </a>
+                        </p>
+                        <button type="button" class="button button-secondary simbe-test-btn" id="simbe-test-api">
+                            <span class="dashicons dashicons-plugins-checked"></span>
+                            <?php esc_html_e('Test Connection', 'simbe-ai-article-generator'); ?>
+                        </button>
+                        <p class="simbe-test-result" id="simbe-test-result"></p>
+                    </div>
+
+                    <div class="simbe-settings-card">
+                        <div class="simbe-settings-card-icon">
+                            <span class="dashicons dashicons-editor-code"></span>
+                        </div>
+                        <h2><?php esc_html_e('AI Model', 'simbe-ai-article-generator'); ?></h2>
+                        <p class="simbe-settings-desc">
+                            <?php esc_html_e('Choose which Groq model is used when generating articles with AI.', 'simbe-ai-article-generator'); ?>
+                        </p>
+                        <select name="simbe1_articles_options[model]" class="simbe-model-select">
+                            <?php foreach ($this->get_models() as $model_id => $model_label): ?>
+                            <option value="<?php echo esc_attr($model_id); ?>" <?php selected($options['model'] ?? 'llama-3.1-8b-instant', $model_id); ?>><?php echo esc_html($model_label); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <p class="simbe-settings-hint">
+                            <?php echo esc_html__('Capacity and availability vary by model.', 'simbe-ai-article-generator'); ?>
+                        </p>
+                    </div>
                 </div>
-                
-                <?php submit_button(); ?>
+
+                <?php submit_button(esc_html__('Save Settings', 'simbe-ai-article-generator'), 'primary large simbe-save-btn'); ?>
             </form>
         </div>
         <?php
+    }
+
+    // AJAX: Test the Groq API connection
+    public function ajax_test_api() {
+        check_ajax_referer('simbe1ajax_nonce', 'security');
+
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(array('message' => __('Permission denied', 'simbe-ai-article-generator')));
+            return;
+        }
+
+        $api_key = $this->get_api_key();
+        if (empty($api_key)) {
+            wp_send_json_error(array('message' => __('Please enter an API key first and save the settings.', 'simbe-ai-article-generator')));
+            return;
+        }
+
+        $response = wp_remote_post('https://api.groq.com/openai/v1/models', array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $api_key,
+            ),
+            'timeout' => 20,
+        ));
+
+        if (is_wp_error($response)) {
+            wp_send_json_error(array('message' => $response->get_error_message()));
+            return;
+        }
+
+        $status = wp_remote_retrieve_response_code($response);
+        $body   = json_decode(wp_remote_retrieve_body($response), true);
+
+        if ($status === 200) {
+            wp_send_json_success(array('message' => __('Connection successful. Your API key is valid.', 'simbe-ai-article-generator')));
+        } else {
+            $msg = $body['error']['message'] ?? sprintf(__('Unexpected response (HTTP %d).', 'simbe-ai-article-generator'), $status);
+            wp_send_json_error(array('message' => $msg));
+        }
     }
 }
 
